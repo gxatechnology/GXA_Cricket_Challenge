@@ -3,35 +3,28 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.jsx'), 'utf8');
-test('No giant center-of-pitch gameplay announcement', () => {
-  assert.doesNotMatch(src, /CENTER OUTCOME BANNER|my-auto px-2|bg-slate-950\/75 backdrop-blur-md border border-white\/15 px-5 py-2\.5/);
-  assert.match(src, /COMPACT MATCH FEEDBACK/);
+test('Manual next ball removed from normal gameplay',()=>{
+  assert.doesNotMatch(src, /Next Ball \(Space\)/);
+  assert.doesNotMatch(src, /schedulePacedTransition\(overBanner \? 10000 : 8000/);
+  assert.match(src, /triggerNextDelivery\(\)/);
 });
-test('All public Phase 3/4 marketing strings removed', () => {
-  assert.doesNotMatch(src, /PHASE\s+[34]/);
+test('Interball pause uses replay-aware timer and short natural waits',()=>{
+  assert.match(src, /const transitionMs = isWicket \? 3200 : runs >= 4 \? 3000 : overBanner \? 3000 : 2800/);
+  assert.match(src, /!isPausedRef\.current && !replaying && !wasReplaying/);
+  assert.match(src, /transitionIdRef\.current/);
 });
-test('Replay and pause freeze inter-delivery clock', () => {
-  assert.match(src, /!isPausedRef\.current\s*&&\s*!engineRef\.current\.isReplaying/);
-  assert.match(src, /if \(eng\.phase !== 'RESETTING' \|\| eng\.isReplaying/);
+test('Compact mobile scoreboard and camera menu',()=>{
+  assert.match(src,/Match scoreboard/);
+  assert.match(src,/striker\?\.name/);
+  assert.match(src,/runsNeeded/);
+  assert.match(src,/cameraMenuOpen/);
 });
-test('Paced delivery and scorecard intervals exist', () => {
-  assert.match(src, /schedulePacedTransition\(overBanner \? 10000 : 8000/);
-  assert.match(src, /schedulePacedTransition\(8500/);
+test('Wallet and upgrade flow with user confirmation',()=>{
+  assert.match(src,/activeModal === 'WALLET'/);
+  assert.match(src,/activeModal === 'GARAGE'/);
+  assert.match(src,/purchaseIntent/);
+  assert.match(src,/getEffectiveBatStats\(activeBat, profileRef\.current\)/);
 });
-test('Player can control replay and choose next delivery', () => {
-  assert.match(src, /Watch Replay/);
-  assert.match(src, /Next Ball \(Space\)/);
-  assert.match(src, /disabled=\{replayPlaying\}/);
-});
-test('Existing gameplay and score code is preserved', () => {
-  assert.match(src, /resolveSweptBatContact/);
-  assert.match(src, /BOWLING_VARIATIONS/);
-  assert.match(src, /GAME_MODES/);
-  assert.match(src, /completeDeliveryOutcome/);
-});
-test('Character controls still present and fielders turn smoothly', () => {
-  assert.match(src, /class BatsmanAnimationController/);
-  assert.match(src, /class BowlerAnimationController/);
-  assert.match(src, /class FielderAnimationController/);
-  assert.match(src, /const smoothlyFace/);
+test('Core 3D engine and original game modes retained',()=>{
+  for(const fragment of ['resolveSweptBatContact','BatsmanAnimationController','BowlerAnimationController','FielderAnimationController','GAME_MODES','BOWLING_VARIATIONS']) assert.ok(src.includes(fragment),fragment);
 });

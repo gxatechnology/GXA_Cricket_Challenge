@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import * as THREE from 'three';
+import { getBatUpgradeCost, getEffectiveBatStats, addWalletTransaction, purchaseBat, upgradeBat, createMatchScorecard, recordBallInScorecard } from './game/progression.mjs';
 import {
   Trophy,
   Play,
@@ -1748,7 +1749,12 @@ export default function App() {
       selectedTheme: 'day',
       achievements: [],
       tournamentStage: 0,
-      dailyChallengeClaimed: false
+      dailyChallengeClaimed: false,
+      batUpgrades: {},
+      coinLedger: [],
+      preferredShot: 'GROUND',
+      preferredDirection: { x: 0, label: 'STRAIGHT DRIVE' },
+      preferredCamera: 'BROADCAST'
     };
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -1768,10 +1774,12 @@ export default function App() {
 
   // UI Navigation & Modal State
   const [screen, setScreen] = useState('HOME'); // 'HOME' | 'PLAYING' | 'GAMEOVER'
-  const [activeModal, setActiveModal] = useState(null); // null | 'SHOP' | 'ACHIEVEMENTS' | 'CONTROLS'
+  const [activeModal, setActiveModal] = useState(null); // null | GARAGE | WALLET | STADIUM | ACHIEVEMENTS | CONTROLS
+  const [purchaseIntent, setPurchaseIntent] = useState(null);
+  const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-  const [cameraPreset, setCameraPreset] = useState('BROADCAST'); // 'BROADCAST' | 'PRO_CLOSE' | 'AERIAL'
+  const [cameraPreset, setCameraPreset] = useState(() => profile.preferredCamera || 'BROADCAST'); // 'BROADCAST' | 'PRO_CLOSE' | 'AERIAL'
 
   // Active Match State
   const [selectedMode, setSelectedMode] = useState(GAME_MODES[0]);
@@ -1806,17 +1814,30 @@ export default function App() {
   });
 
   // Batting Input Controls State
-  const [shotType, setShotType] = useState('GROUND'); // 'GROUND' | 'LOFT' | 'DEFENSE'
-  const [aimDirection, setAimDirection] = useState({ x: 0, label: 'STRAIGHT DRIVE' });
+  const [shotType, setShotType] = useState(() => profile.preferredShot || 'GROUND'); // 'GROUND' | 'LOFT' | 'DEFENSE'
+  const [aimDirection, setAimDirection] = useState(() => profile.preferredDirection || { x: 0, label: 'STRAIGHT DRIVE' });
   const [liveTimingCursor, setLiveTimingCursor] = useState(0);
   const [bowlerPhaseLabel, setBowlerPhaseLabel] = useState('READY');
   const [toastNotification, setToastNotification] = useState(null);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [nextBallCountdown, setNextBallCountdown] = useState(null);
+  const [scorecard, setScorecard] = useState(createMatchScorecard);
+  const scorecardRef = useRef(scorecard);
+  scorecardRef.current = scorecard;
+  const matchIdRef = useRef(`match-${Date.now()}`);
+  const completedBallRef = useRef(-1);
+
+  useEffect(() => {
+    setProfile((p) => {
+      if (p.preferredShot === shotType && p.preferredDirection?.x === aimDirection.x && p.preferredCamera === cameraPreset) return p;
+      return { ...p, preferredShot: shotType, preferredDirection: aimDirection, preferredCamera: cameraPreset };
+    });
+  }, [shotType, aimDirection, cameraPreset]);
 
   // Refs for Three.js & Real-time Game Loop
   const mountRef = useRef(null);
   const deliveryTimeoutRef = useRef(null);
+  const transitionIdRef = useRef(0);
   const engineRef = useRef({
     scene: null,
     camera: null,
@@ -1881,6 +1902,7 @@ export default function App() {
   isPausedRef.current = isPaused;
 
   const clearPendingTimers = useCallback(() => {
+    transitionIdRef.current += 1;
     if (deliveryTimeoutRef.current) {
       clearTimeout(deliveryTimeoutRef.current);
       deliveryTimeoutRef.current = null;
@@ -1892,28 +1914,29 @@ export default function App() {
   // The next delivery never begins during a replay, regardless of its length.
   const schedulePacedTransition = useCallback((delayMs, onComplete) => {
     clearPendingTimers();
+    const transitionId = transitionIdRef.current;
     let remainingMs = delayMs;
     let previousTick = performance.now();
+    let wasReplaying = false;
     setNextBallCountdown(Math.ceil(remainingMs / 1000));
-
     const tick = () => {
+      if (transitionId !== transitionIdRef.current) return;
       const now = performance.now();
-      if (!isPausedRef.current && !engineRef.current.isReplaying) {
-        remainingMs -= now - previousTick;
-      }
+      const replaying = engineRef.current.isReplaying;
+      if (wasReplaying && !replaying) remainingMs = Math.max(remainingMs, 1000);
+      if (!isPausedRef.current && !replaying && !wasReplaying) remainingMs -= now - previousTick;
+      wasReplaying = replaying;
       previousTick = now;
-
       if (remainingMs <= 0) {
         deliveryTimeoutRef.current = null;
         setNextBallCountdown(null);
-        onComplete();
+        if (!isPausedRef.current && !engineRef.current.isReplaying) onComplete();
         return;
       }
       setNextBallCountdown(Math.ceil(remainingMs / 1000));
-      deliveryTimeoutRef.current = window.setTimeout(tick, 150);
+      deliveryTimeoutRef.current = window.setTimeout(tick, 100);
     };
-
-    deliveryTimeoutRef.current = window.setTimeout(tick, 150);
+    deliveryTimeoutRef.current = window.setTimeout(tick, 100);
   }, [clearPendingTimers]);
 
   const showToast = useCallback((title, subtitle) => {
@@ -1928,11 +1951,8 @@ export default function App() {
         const found = ACHIEVEMENTS_LIST.find((a) => a.id === achId);
         if (!found) return prev;
         showToast(`🏆 Achievement Unlocked: ${found.title}`, `+${found.reward} GXA Coins added!`);
-        return {
-          ...prev,
-          coins: prev.coins + found.reward,
-          achievements: [...prev.achievements, achId]
-        };
+        const next = addWalletTransaction(prev, found.reward, `Achievement: ${found.title}`, `achievement-${achId}`);
+        return { ...next, achievements: [...next.achievements, achId] };
       });
     },
     [showToast]
@@ -2025,108 +2045,90 @@ export default function App() {
   const completeDeliveryOutcome = useCallback(
     (runs, isWicket, headline, subtitle, dismissalType = null) => {
       const eng = engineRef.current;
+      if (eng.phase === 'RESETTING' || eng.phase === 'IDLE') return; // one resolution per ball
       eng.phase = 'RESETTING';
       setBowlerPhaseLabel('NEXT DELIVERY READY');
       clearPendingTimers();
+      const prev = matchStateRef.current;
+      if (completedBallRef.current === prev.ballsBowled) return;
+      completedBallRef.current = prev.ballsBowled;
 
       if (runs === 6) eng.cameraShake = 0.75;
       else if (runs === 4) eng.cameraShake = 0.4;
 
-      setMatchState((prev) => {
-        const effectiveRuns = selectedMode.onlySixesCountBonus && runs === 6 ? 10 : runs;
+      const effectiveRuns = selectedMode.onlySixesCountBonus && runs === 6 ? 10 : runs;
+      const newRuns = prev.runs + effectiveRuns;
+      const newWickets = prev.wickets + (isWicket ? 1 : 0);
+      const newBalls = prev.ballsBowled + 1;
+      const newSixes = prev.sixesCount + (runs === 6 ? 1 : 0);
+      const newFours = prev.foursCount + (runs === 4 ? 1 : 0);
+      const newStreak = runs >= 4 ? prev.streakBoundaries + 1 : 0;
+      const nextOverArr = newBalls % 6 === 1 ? [isWicket ? 'W' : String(runs)] : [...prev.thisOver, isWicket ? 'W' : String(runs)];
+      const overBanner = newBalls % 6 === 0 && newBalls < prev.totalBalls
+        ? `END OF OVER ${newBalls / 6} • SCORE: ${newRuns}/${newWickets}` : null;
+      const nextWagon = runs > 0
+        ? [...prev.wagonWheelShots.slice(-11), { x: eng.ballPos.x, z: eng.ballPos.z, runs }]
+        : prev.wagonWheelShots;
+      const chasedTarget = prev.target !== null && newRuns >= prev.target;
+      const allOut = newWickets >= prev.maxWickets;
+      const oversFinished = newBalls >= prev.totalBalls;
+      const finished = chasedTarget || allOut || oversFinished;
+      const updated = {
+        ...prev,
+        runs: newRuns, wickets: newWickets, ballsBowled: newBalls,
+        sixesCount: newSixes, foursCount: newFours, streakBoundaries: newStreak,
+        thisOver: nextOverArr, wagonWheelShots: nextWagon,
+        lastDismissalType: dismissalType, overBannerText: overBanner,
+        lastOutcomeText: headline, lastOutcomeSub: subtitle, isBallActive: false,
+        canSkipToNextBall: false, canReplay: eng.replayTrajectory.length > 1
+      };
+      matchStateRef.current = updated;
+      setMatchState(updated);
+      const card = recordBallInScorecard(scorecardRef.current, runs, isWicket, newBalls, prev.maxWickets);
+      scorecardRef.current = card;
+      setScorecard(card);
 
-        const newRuns = prev.runs + effectiveRuns;
-        const newWickets = prev.wickets + (isWicket ? 1 : 0);
-        const newBalls = prev.ballsBowled + 1;
-        const newSixes = prev.sixesCount + (runs === 6 ? 1 : 0);
-        const newFours = prev.foursCount + (runs === 4 ? 1 : 0);
-        const newStreak = runs >= 4 ? prev.streakBoundaries + 1 : 0;
+      if (runs > 0) {
+        const gain = runs === 6 ? 15 : runs === 4 ? 8 : runs * 2;
+        setProfile((p) => {
+          const credited = addWalletTransaction(p, gain, `${runs} run${runs !== 1 ? 's' : ''}`, `${matchIdRef.current}-ball-${newBalls}`);
+          if (credited === p) return p;
+          return { ...credited, xp: credited.xp + runs * 10, totalRuns: credited.totalRuns + runs,
+            totalSixes: credited.totalSixes + (runs === 6 ? 1 : 0) };
+        });
+      }
+      if (runs === 6) unlockAchievement('first_six');
+      if (newStreak >= 3) unlockAchievement('hattrick_4s');
+      if (newRuns >= 50) unlockAchievement('fifty_club');
 
-        const ballBadge = isWicket ? 'W' : String(runs);
-        const nextOverArr = newBalls % 6 === 1 ? [ballBadge] : [...prev.thisOver, ballBadge];
-
-        const completedOverNumber = newBalls > 0 && newBalls % 6 === 0 ? newBalls / 6 : null;
-        const overBanner =
-          completedOverNumber && newBalls < prev.totalBalls
-            ? `END OF OVER ${completedOverNumber} • SCORE: ${newRuns}/${newWickets}`
-            : null;
-
-        const nextWagon =
-          runs > 0
-            ? [...prev.wagonWheelShots.slice(-11), { x: eng.ballPos.x, z: eng.ballPos.z, runs }]
-            : prev.wagonWheelShots;
-
-        if (runs === 6) unlockAchievement('first_six');
-        if (newStreak >= 3) unlockAchievement('hattrick_4s');
-        if (newRuns >= 50) unlockAchievement('fifty_club');
-
-        if (runs > 0) {
-          const coinGain = runs === 6 ? 15 : runs === 4 ? 8 : runs * 2;
-          setProfile((p) => ({
-            ...p,
-            coins: p.coins + coinGain,
-            xp: p.xp + runs * 10,
-            totalRuns: p.totalRuns + runs,
-            totalSixes: p.totalSixes + (runs === 6 ? 1 : 0)
-          }));
-        }
-
-        const chasedTarget = prev.target !== null && newRuns >= prev.target;
-        const allOut = newWickets >= prev.maxWickets;
-        const oversFinished = newBalls >= prev.totalBalls;
-
-        if (chasedTarget || allOut || oversFinished) {
-          // Allow players to enjoy the final shot and choose a replay before the scorecard.
-          schedulePacedTransition(8500, () => {
-            platformSDK.submitScore(selectedMode.id, newRuns);
-            setProfile((p) => {
-              const prevBest = p.highScores[selectedMode.id] || 0;
-              const nextStage =
-                selectedMode.isTournament && chasedTarget
-                  ? Math.min(2, p.tournamentStage + 1)
-                  : p.tournamentStage;
-              if (selectedMode.isTournament && chasedTarget && p.tournamentStage === 2) {
-                unlockAchievement('tournament_champ');
-              }
-              return {
-                ...p,
-                tournamentStage: nextStage,
-                highScores: {
-                  ...p.highScores,
-                  [selectedMode.id]: Math.max(prevBest, newRuns)
-                }
-              };
-            });
-            setScreen('GAMEOVER');
-            eng.phase = 'IDLE';
+      if (finished) {
+        schedulePacedTransition(2100, () => {
+          platformSDK.submitScore(selectedMode.id, newRuns);
+          setProfile((p) => {
+            const prevBest = p.highScores[selectedMode.id] || 0;
+            const nextStage = selectedMode.isTournament && chasedTarget
+              ? Math.min(2, p.tournamentStage + 1) : p.tournamentStage;
+            const reward = chasedTarget ? 40 : 20;
+            const credited = addWalletTransaction(p, reward, `Completed ${selectedMode.name}`, `${matchIdRef.current}-completion`);
+            return { ...credited, tournamentStage: nextStage, highScores: {
+              ...credited.highScores, [selectedMode.id]: Math.max(prevBest, newRuns)
+            } };
           });
-        } else {
-          // A natural broadcast pause: 8s between balls, longer at the end of an over.
-          schedulePacedTransition(overBanner ? 10000 : 8000, () => {
-            eng.phase = 'IDLE';
-            triggerNextDelivery();
-          });
-        }
-
-        return {
-          ...prev,
-          runs: newRuns,
-          wickets: newWickets,
-          ballsBowled: newBalls,
-          sixesCount: newSixes,
-          foursCount: newFours,
-          streakBoundaries: newStreak,
-          thisOver: nextOverArr,
-          wagonWheelShots: nextWagon,
-          lastDismissalType: dismissalType,
-          overBannerText: overBanner,
-          lastOutcomeText: headline,
-          lastOutcomeSub: subtitle,
-          isBallActive: false,
-          canSkipToNextBall: !(chasedTarget || allOut || oversFinished),
-          canReplay: runs >= 4 || isWicket
-        };
-      });
+          if (selectedMode.isTournament && chasedTarget && profileRef.current.tournamentStage === 2) {
+            unlockAchievement('tournament_champ');
+          }
+          setScreen('GAMEOVER');
+          eng.phase = 'IDLE';
+        });
+      } else {
+        // Normal 2.8s / boundary 3.0s / wicket 3.2s; always automatic.
+        const transitionMs = isWicket ? 3200 : runs >= 4 ? 3000 : overBanner ? 3000 : 2800;
+        schedulePacedTransition(transitionMs, () => {
+          if (eng.phase !== 'RESETTING') return;
+          eng.phase = 'IDLE';
+          triggerNextDelivery();
+        });
+      }
     },
     [clearPendingTimers, schedulePacedTransition, selectedMode, triggerNextDelivery, unlockAchievement]
   );
@@ -2657,7 +2659,7 @@ export default function App() {
 
       const deltaZ = 7.45 - contactBallZ;
       const activeBat = BATS_CATALOG.find((b) => b.id === profileRef.current.selectedBat) || BATS_CATALOG[0];
-      const windowMult = activeBat.timingWindowBonus;
+      const windowMult = getEffectiveBatStats(activeBat, profileRef.current).timingWindowBonus;
       const absDelta = Math.abs(deltaZ);
 
       if (Math.abs(ballX) > 1.38 || ballY > 2.2) {
@@ -2718,7 +2720,7 @@ export default function App() {
       eng.pitchMarker.visible = false;
       setBowlerPhaseLabel('SHOT PLAYED');
 
-      const batPower = activeBat.powerBoost;
+      const batPower = getEffectiveBatStats(activeBat, profileRef.current).powerBoost;
       let exitSpeed = 22;
       let elevationDeg = 10;
 
@@ -3232,13 +3234,6 @@ export default function App() {
 
       if (isPausedRef.current) return;
 
-      if (e.code === 'Space' && engineRef.current.phase === 'RESETTING' && !engineRef.current.isReplaying && matchStateRef.current.canSkipToNextBall) {
-        e.preventDefault();
-        engineRef.current.phase = 'IDLE';
-        triggerNextDelivery();
-        return;
-      }
-
       if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
         setAimDirection({ x: -0.78, label: 'OFF-SIDE COVER DRIVE' });
       } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
@@ -3343,15 +3338,24 @@ export default function App() {
 
     setMatchState(initialState);
     matchStateRef.current = initialState;
+    const freshCard = createMatchScorecard();
+    setScorecard(freshCard);
+    scorecardRef.current = freshCard;
+    matchIdRef.current = `match-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    completedBallRef.current = -1;
 
     setProfile((p) => ({ ...p, matchesPlayed: p.matchesPlayed + 1 }));
     setScreen('PLAYING');
     engineRef.current.phase = 'IDLE';
     resetFieldPositions();
 
-    deliveryTimeoutRef.current = setTimeout(() => {
-      triggerNextDelivery();
-    }, 1000);
+    schedulePacedTransition(850, () => triggerNextDelivery());
+  };
+
+  const stopReplay = () => {
+    engineRef.current.isReplaying = false;
+    setReplayPlaying(false);
+    if (engineRef.current.ballMesh) engineRef.current.ballMesh.visible = false;
   };
 
   const triggerActionReplay = () => {
@@ -3372,6 +3376,12 @@ export default function App() {
   const totalOversFormatted = `${Math.floor(matchState.totalBalls / 6)}.${matchState.totalBalls % 6}`;
   const currentRunRate =
     matchState.ballsBowled > 0 ? ((matchState.runs / matchState.ballsBowled) * 6).toFixed(1) : '0.0';
+  const ballsLeft = Math.max(0, matchState.totalBalls - matchState.ballsBowled);
+  const runsNeeded = matchState.target === null ? null : Math.max(0, matchState.target - matchState.runs);
+  const requiredRate = runsNeeded !== null && ballsLeft > 0 ? ((runsNeeded / ballsLeft) * 6).toFixed(1) : null;
+  const opponentName = selectedMode.isTournament ? (matchState.tournamentRoundName || 'Tournament AI') : 'Practice XI · AI';
+  const striker = scorecard.players[scorecard.striker];
+  const nonStriker = scorecard.players[scorecard.nonStriker];
 
   return (
     <div className="relative w-full h-screen overflow-hidden select-none bg-slate-950 font-sans text-white">
@@ -3432,7 +3442,7 @@ export default function App() {
                     if (unlocked) {
                       setProfile((p) => ({ ...p, selectedTheme: t.id }));
                     } else {
-                      setActiveModal('SHOP');
+                      setActiveModal('STADIUM');
                     }
                   }}
                   className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold transition ${
@@ -3447,10 +3457,11 @@ export default function App() {
             })}
           </div>
 
-          <div className="flex items-center gap-1.5 bg-amber-500/15 border border-amber-400/30 px-3 py-1.5 rounded-xl">
+          <button type="button" onClick={() => { if (screen !== 'PLAYING') setActiveModal('WALLET'); }} title={screen === 'PLAYING' ? 'Coins available in the main menu' : 'Open coin wallet'}
+            className="flex items-center gap-1 bg-amber-500/15 border border-amber-400/30 px-2 py-1.5 rounded-xl">
             <Award className="w-4 h-4 text-amber-400" />
             <span className="text-xs font-black text-amber-300">{profile.coins}</span>
-          </div>
+          </button>
 
           <button
             onClick={toggleSound}
@@ -3531,11 +3542,15 @@ export default function App() {
               {/* Secondary Utility Buttons */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
                 <button
-                  onClick={() => setActiveModal('SHOP')}
+                  onClick={() => setActiveModal('GARAGE')}
                   className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-white/10 text-xs font-bold"
                 >
                   <ShoppingBag className="w-3.5 h-3.5 text-emerald-400" />
-                  Bat Armory
+                  Bat Garage
+                </button>
+                <button onClick={() => setActiveModal('WALLET')}
+                  className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-white/10 text-xs font-bold">
+                  <Award className="w-3.5 h-3.5 text-amber-400" /> Wallet
                 </button>
                 <button
                   onClick={() => setActiveModal('ACHIEVEMENTS')}
@@ -3599,184 +3614,92 @@ export default function App() {
 
       {}
       {screen === 'PLAYING' && (
-        <div className="relative z-10 h-[calc(100vh-56px)] flex flex-col justify-between p-3 sm:p-4 pointer-events-none">
-          {/* TOP BROADCAST SCOREBOARD & TELEMETRY */}
+        <div className="relative z-10 h-[calc(100dvh-58px)] flex flex-col justify-between p-2 sm:p-4 pb-[max(8px,env(safe-area-inset-bottom))] pointer-events-none">
+          {/* COMPACT MODE-AWARE SCORE HUD: edge aligned, no center obstructing the pitch */}
           <div className="flex flex-wrap items-start justify-between gap-2">
-            {/* Score & Overs Card */}
-            <div className="pointer-events-auto bg-slate-950/85 backdrop-blur-md border border-white/15 rounded-2xl px-4 py-2.5 shadow-xl flex items-center gap-4">
-              <div>
-                <div className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-400">
-                  {selectedMode.name}
-                </div>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-2xl sm:text-3xl font-black tracking-tight">
-                    {matchState.runs}/{matchState.wickets}
+            <section aria-label="Match scoreboard" className="pointer-events-auto w-[min(100%,380px)] sm:w-auto max-w-full bg-slate-950/85 border border-white/15 rounded-xl px-3 py-2 shadow-lg backdrop-blur-md">
+              <div className="flex items-center justify-between gap-2 text-[10px] uppercase font-extrabold tracking-wide">
+                <span className="text-emerald-300">GXA XI vs {opponentName}</span>
+                <span className="text-slate-400">{oversFormatted} / {totalOversFormatted} ov</span>
+              </div>
+              <div className="flex items-center justify-between gap-3 mt-0.5">
+                <span className="text-xl sm:text-2xl font-black tabular-nums">{matchState.runs}/{matchState.wickets}</span>
+                {runsNeeded !== null ? (
+                  <span className="text-right text-xs font-bold text-amber-300">Target {matchState.target} · Need {runsNeeded} off {ballsLeft}</span>
+                ) : (
+                  <span className="text-right text-xs font-semibold text-slate-300">
+                    {selectedMode.id === 'six_challenge' ? `Sixes ${matchState.sixesCount} · ${ballsLeft} balls left` : `CRR ${currentRunRate}`}
                   </span>
-                  <span className="text-xs font-bold text-slate-300">
-                    ({oversFormatted} / {totalOversFormatted} ov)
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-400 font-semibold flex items-center gap-3">
-                  <span>CRR: {currentRunRate}</span>
-                  {matchState.target && (
-                    <span className="text-amber-300 font-bold">
-                      Need {Math.max(0, matchState.target - matchState.runs)} off{' '}
-                      {matchState.totalBalls - matchState.ballsBowled}b
-                    </span>
-                  )}
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-white/10 mt-1 pt-1 text-[10px] sm:text-[11px] text-slate-200">
+                <span className="text-emerald-300 font-bold">{striker?.name}* {striker?.runs} ({striker?.balls})</span>
+                <span>{nonStriker?.name} {nonStriker?.runs} ({nonStriker?.balls})</span>
+                {requiredRate && <span className="text-amber-300">RRR {requiredRate}</span>}
+              </div>
+            </section>
+
+            <div className="pointer-events-auto flex items-start gap-1.5 ml-auto">
+              <div className="hidden md:block bg-slate-950/85 border border-white/15 rounded-xl p-2 text-xs max-w-[205px]">
+                <div className="text-[10px] text-slate-400 font-bold">AI BOWLER · {matchState.deliverySpeed || '--'} KM/H</div>
+                <div className="font-semibold truncate">{matchState.deliveryName}</div>
+                <div className="h-1 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                  <div className="h-full bg-emerald-400" style={{width:`${liveTimingCursor}%`}} />
                 </div>
               </div>
-
-              {/* This Over Balls */}
-              <div className="hidden sm:flex flex-col border-l border-white/10 pl-3">
-                <span className="text-[10px] font-bold text-slate-400 mb-1">THIS OVER</span>
-                <div className="flex items-center gap-1">
-                  {[0, 1, 2, 3, 4, 5].map((idx) => {
-                    const val = matchState.thisOver[idx];
-                    return (
-                      <div
-                        key={idx}
-                        className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-black border ${
-                          val === 'W'
-                            ? 'bg-rose-600 border-rose-400 text-white'
-                            : val === '6'
-                            ? 'bg-emerald-500 border-emerald-300 text-slate-950'
-                            : val === '4'
-                            ? 'bg-sky-500 border-sky-300 text-slate-950'
-                            : val
-                            ? 'bg-slate-800 border-white/20 text-white'
-                            : 'bg-slate-900/50 border-white/10 text-slate-600'
-                        }`}
-                      >
-                        {val || '•'}
-                      </div>
-                    );
-                  })}
-                </div>
+              <div className="relative">
+                <button type="button" onClick={() => setCameraMenuOpen((v) => !v)}
+                  aria-expanded={cameraMenuOpen} aria-label="Camera settings"
+                  className="flex items-center gap-1 bg-slate-950/85 border border-white/15 rounded-xl p-2" title="Camera settings">
+                  <Camera className="w-4 h-4 text-sky-400" />
+                </button>
+                {cameraMenuOpen && (
+                  <div className="absolute right-0 top-full mt-1 z-30 w-36 rounded-xl bg-slate-950 border border-white/20 p-1 shadow-xl">
+                    {[{id:'BROADCAST',label:'Broadcast'},{id:'PRO_CLOSE',label:'Batter Close'},{id:'AERIAL',label:'Aerial'}].map((choice) => (
+                      <button type="button" key={choice.id} onClick={() => {setCameraPreset(choice.id);setCameraMenuOpen(false);}}
+                        className={`block w-full px-3 py-2 rounded-lg text-left text-xs ${cameraPreset===choice.id?'bg-emerald-500 text-slate-950 font-bold':'hover:bg-slate-800'}`}>
+                        {choice.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-            </div>
-
-            {/* Right Bowler Speedometer, Timing Meter & Mini Wagon Wheel */}
-            <div className="pointer-events-auto flex items-center gap-2">
-              <div className="bg-slate-950/85 backdrop-blur-md border border-white/15 rounded-2xl px-3.5 py-2 shadow-xl">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[10px] font-bold text-slate-400">{bowlerPhaseLabel}</span>
-                  <span className="text-xs font-black text-amber-400">
-                    {matchState.deliverySpeed > 0 ? `${matchState.deliverySpeed} KM/H` : '-- KM/H'}
-                  </span>
-                </div>
-                <div className="text-xs font-extrabold text-white truncate max-w-[170px]">
-                  {matchState.deliveryName}
-                </div>
-                {/* Live Timing Progress Bar */}
-                <div className="w-40 h-2 bg-slate-800 rounded-full overflow-hidden mt-1.5 relative">
-                  <div className="absolute inset-y-0 left-[72%] w-[16%] bg-emerald-400/40" />
-                  <div
-                    className="h-full bg-gradient-to-r from-sky-400 via-amber-400 to-emerald-400 transition-all duration-75"
-                    style={{ width: `${liveTimingCursor}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* Mini 2D Wagon Wheel */}
-              <div className="hidden md:flex flex-col items-center bg-slate-950/85 border border-white/15 rounded-2xl p-2">
-                <svg viewBox="-70 -70 140 140" className="w-14 h-14">
-                  <circle cx="0" cy="0" r="64" fill="#064e3b" stroke="#10b981" strokeWidth="3" />
-                  <rect x="-3" y="-12" width="6" height="24" fill="#d6b27c" />
-                  {matchState.wagonWheelShots.map((s, i) => (
-                    <line
-                      key={i}
-                      x1="0"
-                      y1="8"
-                      x2={Math.max(-62, Math.min(62, s.x))}
-                      y2={Math.max(-62, Math.min(62, s.z))}
-                      stroke={s.runs === 6 ? '#34d399' : s.runs === 4 ? '#38bdf8' : '#facc15'}
-                      strokeWidth={s.runs >= 4 ? '3' : '1.8'}
-                    />
-                  ))}
-                </svg>
-              </div>
-
-              {/* Camera Angle Cycle Button */}
-              <button
-                onClick={() =>
-                  setCameraPreset((c) =>
-                    c === 'BROADCAST' ? 'PRO_CLOSE' : c === 'PRO_CLOSE' ? 'AERIAL' : 'BROADCAST'
-                  )
-                }
-                className="bg-slate-950/85 hover:bg-slate-900 border border-white/15 rounded-2xl p-2.5 text-xs font-bold flex flex-col items-center gap-0.5"
-                title="Switch Camera View"
-              >
-                <Camera className="w-4 h-4 text-sky-400" />
-                <span className="text-[9px] text-slate-300">{cameraPreset}</span>
-              </button>
             </div>
           </div>
 
-          {/* COMPACT MATCH FEEDBACK: BELOW CAMERA, ABOVE CONTROLS, NEVER MID-PITCH */}
-          {matchState.canSkipToNextBall || matchState.canReplay || matchState.overBannerText ? (
-            <div className="pointer-events-none mt-auto mb-2 flex justify-center sm:justify-end">
-              <div
-                className="pointer-events-auto max-w-full flex flex-wrap items-center justify-center gap-2 px-3 py-2 rounded-xl bg-slate-950/85 border border-white/15 shadow-lg backdrop-blur-md text-xs"
-                role="status"
-                aria-live="polite"
-              >
-                <span className="font-extrabold text-white">{matchState.overBannerText || matchState.lastOutcomeText}</span>
-                {matchState.lastTimingBadge && (
-                  <span className={`font-bold text-[10px] ${matchState.lastTimingBadge === 'PERFECT' ? 'text-emerald-300' : matchState.lastTimingBadge === 'GOOD' ? 'text-sky-300' : 'text-amber-300'}`}>
-                    {matchState.lastTimingBadge} TIMING
-                  </span>
-                )}
-                {nextBallCountdown !== null && (
-                  <span className="text-[10px] text-slate-300 font-semibold">
-                    {replayPlaying ? 'Replay in progress — timer paused' : isPaused ? 'Paused' : matchState.canSkipToNextBall ? `Next ball in ${nextBallCountdown}s` : `Scorecard in ${nextBallCountdown}s`}
-                  </span>
-                )}
-                {matchState.canReplay && (
-                  <button
-                    type="button"
-                    onClick={triggerActionReplay}
-                    disabled={replayPlaying}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-sky-500/20 text-sky-200 hover:bg-sky-500/30 disabled:opacity-40 border border-sky-400/40 font-bold"
-                    title="Watch this delivery again; next-ball timer stops during replay"
-                  >
-                    <Video className="w-3.5 h-3.5" /> {replayPlaying ? 'Replaying...' : 'Watch Replay'}
-                  </button>
-                )}
-                {matchState.canSkipToNextBall && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      engineRef.current.phase = 'IDLE';
-                      triggerNextDelivery();
-                    }}
-                    disabled={replayPlaying}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 font-bold"
-                  >
-                    <Play className="w-3 h-3 fill-current" /> Next Ball (Space)
-                  </button>
-                )}
+          {/* Tiny non-blocking delivery feedback and optional replay (no manual Next Ball) */}
+          {matchState.ballsBowled > 0 && (
+            <div className="pointer-events-none mt-auto mb-1 flex justify-end">
+              <div className="pointer-events-auto max-w-[min(100%,320px)] flex flex-wrap items-center justify-end gap-2 bg-slate-950/75 border border-white/10 px-2 py-1 rounded-lg text-[10px] shadow-md">
+                <span className="font-semibold">{matchState.overBannerText || matchState.lastOutcomeText}</span>
+                {nextBallCountdown !== null && <span className="text-slate-400">{replayPlaying ? 'Replay' : `Auto ${nextBallCountdown}s`}</span>}
+                {matchState.canReplay && (replayPlaying ? (
+                  <button type="button" onClick={stopReplay} className="text-amber-300 font-bold" aria-label="Skip replay">Skip</button>
+                ) : (
+                  <button type="button" onClick={triggerActionReplay} className="text-sky-300 font-bold inline-flex items-center gap-1"><Video className="w-3 h-3" /> Replay</button>
+                ))}
               </div>
             </div>
-          ) : <div className="mt-auto" />}
+          )}
+          {matchState.ballsBowled === 0 && <div className="mt-auto" />}
 
           {/* BOTTOM BATTING DECK (DIRECTION + SHOT TYPE + SWING TRIGGER) */}
-          <div className="pointer-events-auto flex flex-col sm:flex-row items-stretch sm:items-end justify-between gap-2.5 bg-slate-950/85 backdrop-blur-xl border border-white/15 rounded-3xl p-3 shadow-2xl">
+          <div className="pointer-events-auto flex flex-col sm:flex-row items-stretch sm:items-end justify-between gap-1.5 sm:gap-2 bg-slate-950/90 backdrop-blur-xl border border-white/15 rounded-2xl p-2 sm:p-3 shadow-xl">
             {/* Shot Direction Selector */}
             <div className="flex flex-col gap-1">
               <span className="text-[10px] font-bold text-slate-400 uppercase px-1">
-                1. Aim Shot Direction ({aimDirection.label})
+                Direction · {aimDirection.label}
               </span>
               <div className="grid grid-cols-3 gap-1.5">
                 {[
-                  { label: 'Cover (A / ←)', x: -0.78, full: 'OFF-SIDE COVER DRIVE' },
-                  { label: 'Straight (W / ↑)', x: 0, full: 'STRAIGHT DRIVE' },
-                  { label: 'Pull (D / →)', x: 0.78, full: 'LEG-SIDE PULL / FLICK' }
+                  { label: 'Cover', x: -0.78, full: 'OFF-SIDE COVER DRIVE' },
+                  { label: 'Straight', x: 0, full: 'STRAIGHT DRIVE' },
+                  { label: 'Pull', x: 0.78, full: 'LEG-SIDE PULL / FLICK' }
                 ].map((dir) => (
                   <button
                     key={dir.label}
                     onClick={() => setAimDirection({ x: dir.x, label: dir.full })}
-                    className={`px-3 py-2 rounded-xl text-xs font-extrabold border transition ${
+                    className={`min-w-0 px-2 sm:px-3 py-2 rounded-lg text-[11px] sm:text-xs font-extrabold border transition ${
                       Math.abs(aimDirection.x - dir.x) < 0.15
                         ? 'bg-sky-500 text-slate-950 border-sky-300'
                         : 'bg-slate-900 text-slate-300 border-white/10 hover:bg-slate-800'
@@ -3789,19 +3712,19 @@ export default function App() {
             </div>
 
             {/* Shot Style Selector + Giant Swing Button */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap sm:flex-nowrap items-end justify-between gap-2">
               <div className="flex flex-col gap-1">
-                <span className="text-[10px] font-bold text-slate-400 uppercase px-1">2. Shot Mode</span>
+                <span className="text-[10px] font-bold text-slate-400 uppercase px-1">Shot Type</span>
                 <div className="flex gap-1.5">
                   {[
-                    { id: 'DEFENSE', label: 'Defend (X)', color: 'bg-slate-700 text-white' },
+                    { id: 'DEFENSE', label: 'Defend', color: 'bg-slate-700 text-white' },
                     { id: 'GROUND', label: 'Drive', color: 'bg-emerald-500 text-slate-950' },
-                    { id: 'LOFT', label: 'Loft 6 (Shift)', color: 'bg-amber-500 text-slate-950' }
+                    { id: 'LOFT', label: 'Loft', color: 'bg-amber-500 text-slate-950' }
                   ].map((st) => (
                     <button
                       key={st.id}
                       onClick={() => setShotType(st.id)}
-                      className={`px-3 py-2 rounded-xl text-xs font-black border transition ${
+                      className={`px-2 sm:px-3 py-2 rounded-lg text-[11px] sm:text-xs font-black border transition ${
                         shotType === st.id
                           ? `${st.color} border-white`
                           : 'bg-slate-900 text-slate-300 border-white/10 hover:bg-slate-800'
@@ -3815,7 +3738,7 @@ export default function App() {
 
               <button
                 onClick={() => executeBatSwing(null, shotType)}
-                className="px-6 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-400 to-teal-500 hover:from-emerald-300 hover:to-teal-400 active:scale-95 text-slate-950 font-black text-sm sm:text-base shadow-xl flex items-center gap-2"
+                className="shrink-0 px-4 sm:px-6 py-3 rounded-xl bg-gradient-to-r from-emerald-400 to-teal-500 hover:from-emerald-300 hover:to-teal-400 active:scale-95 text-slate-950 font-black text-sm sm:text-base shadow-xl flex items-center gap-2"
               >
                 <Crosshair className="w-5 h-5" />
                 <span>SWING BAT</span>
@@ -3922,61 +3845,108 @@ export default function App() {
           <div className="bg-slate-900 border border-white/15 rounded-3xl p-5 max-w-xl w-full max-h-[85vh] overflow-y-auto shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-4">
               <h3 className="text-lg font-black">
-                {activeModal === 'SHOP' && 'GXA PRO BAT ARMORY & STADIUMS'}
+                {activeModal === 'GARAGE' && 'BAT GARAGE'}
+                {activeModal === 'WALLET' && 'GXA COIN WALLET'}
+                {activeModal === 'STADIUM' && 'STADIUM THEMES'}
                 {activeModal === 'ACHIEVEMENTS' && 'TROPHY CABINET & MILESTONES'}
                 {activeModal === 'CONTROLS' && 'HOW TO PLAY & CONTROLS'}
               </h3>
               <button
-                onClick={() => setActiveModal(null)}
+                onClick={() => { setActiveModal(null); setPurchaseIntent(null); }}
                 className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold"
               >
                 Close
               </button>
             </div>
 
-            {activeModal === 'SHOP' && (
+            {activeModal === 'WALLET' && (
               <div className="space-y-3">
+                <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-center justify-between">
+                  <span className="text-sm font-bold text-amber-200">Available GXA Coins</span>
+                  <span className="text-2xl font-black text-amber-400">{profile.coins}</span>
+                </div>
+                <p className="text-xs text-slate-400">Earn coins from match runs and achievements. These are virtual in-game points, not cash or advertising revenue.</p>
+                <button type="button" onClick={() => setActiveModal('GARAGE')} className="w-full bg-slate-800 py-2 rounded-xl font-bold text-sm">Open Bat Garage</button>
+                <h4 className="font-bold text-sm mt-3">Recent coin activity</h4>
+                {(profile.coinLedger || []).length === 0 ? <p className="text-xs text-slate-400">New transactions will appear here. Existing coin balances are preserved.</p> :
+                  (profile.coinLedger || []).slice(0, 20).map((entry) => (
+                    <div key={entry.id} className="flex justify-between items-center text-xs py-2 border-b border-white/10">
+                      <span className="text-slate-300">{entry.reason}</span><span className={entry.amount > 0 ? 'text-emerald-300 font-bold' : 'text-rose-300 font-bold'}>{entry.amount > 0 ? '+' : ''}{entry.amount}</span>
+                    </div>
+                  ))}
+              </div>
+            )}
+            {activeModal === 'GARAGE' && (
+              <div className="space-y-3">
+                <div className="flex justify-between items-center text-xs font-bold text-amber-300">
+                  <span>Balance: {profile.coins} coins</span>
+                  <button onClick={() => setActiveModal('WALLET')} className="underline">View Wallet</button>
+                </div>
                 {BATS_CATALOG.map((bat) => {
                   const unlocked = profile.unlockedBats.includes(bat.id);
                   const equipped = profile.selectedBat === bat.id;
+                  const stats = getEffectiveBatStats(bat, profile);
+                  const upgradeCost = getBatUpgradeCost(stats.level);
                   return (
-                    <div
-                      key={bat.id}
-                      className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-950/80 border border-white/10"
-                    >
-                      <div>
-                        <div className="font-extrabold text-sm">{bat.name}</div>
-                        <div className="text-xs text-slate-400">{bat.desc}</div>
+                    <div key={bat.id} className="p-3 rounded-2xl bg-slate-950/80 border border-white/10 space-y-2">
+                      <div className="flex flex-wrap justify-between gap-2">
+                        <div><div className="font-bold text-sm">{bat.name} {equipped && <span className="text-emerald-300 text-xs">· EQUIPPED</span>}</div>
+                          <p className="text-xs text-slate-400">{bat.desc}</p></div>
+                        <span className="text-xs text-amber-300 font-bold">Level {stats.level}/{4}</span>
                       </div>
-                      <button
-                        onClick={() => {
-                          if (unlocked) {
-                            setProfile((p) => ({ ...p, selectedBat: bat.id }));
-                          } else if (profile.coins >= bat.cost) {
-                            setProfile((p) => ({
-                              ...p,
-                              coins: p.coins - bat.cost,
-                              unlockedBats: [...p.unlockedBats, bat.id],
-                              selectedBat: bat.id
-                            }));
-                            showToast(`Unlocked ${bat.name}!`, 'Equipped for your next innings.');
-                          }
-                        }}
-                        className={`px-3.5 py-2 rounded-xl text-xs font-black ${
-                          equipped
-                            ? 'bg-emerald-500 text-slate-950'
-                            : unlocked
-                            ? 'bg-slate-800 text-white'
-                            : profile.coins >= bat.cost
-                            ? 'bg-amber-500 text-slate-950'
-                            : 'bg-slate-800/50 text-slate-500'
-                        }`}
-                      >
-                        {equipped ? 'Equipped' : unlocked ? 'Equip' : `${bat.cost} Coins`}
-                      </button>
+                      <div className="grid grid-cols-3 gap-2 text-[11px] bg-white/5 rounded-lg p-2">
+                        <div>Power <strong className="block text-white">{Math.round(stats.powerBoost * 100)}%</strong></div>
+                        <div>Timing <strong className="block text-white">{Math.round(stats.timingWindowBonus * 100)}%</strong></div>
+                        <div>Control <strong className="block text-white">{stats.control}/100</strong></div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => unlocked ? setProfile((p) => ({...p,selectedBat:bat.id})) : setPurchaseIntent({type:'UNLOCK',id:bat.id})}
+                          disabled={equipped || (!unlocked && profile.coins < bat.cost)} className="flex-1 p-2 text-xs font-bold rounded-lg bg-emerald-500 text-slate-950 disabled:opacity-50">
+                          {equipped ? 'Equipped' : unlocked ? 'Equip' : `Unlock · ${bat.cost} coins`}
+                        </button>
+                        {unlocked && <button type="button" onClick={() => setPurchaseIntent({type:'UPGRADE',id:bat.id})}
+                          disabled={upgradeCost===null || profile.coins<upgradeCost} className="flex-1 p-2 text-xs font-bold rounded-lg bg-amber-500 text-slate-950 disabled:opacity-50">
+                          {upgradeCost===null ? 'MAX LEVEL' : `Upgrade · ${upgradeCost} coins`}
+                        </button>}
+                      </div>
                     </div>
                   );
                 })}
+              </div>
+            )}
+            {activeModal === 'STADIUM' && (
+              <div className="space-y-2">
+                {Object.values(STADIUM_THEMES).map((theme) => {
+                  const unlocked = profile.unlockedThemes.includes(theme.id);
+                  return <button key={theme.id} type="button" className="w-full flex justify-between items-center p-3 bg-slate-950 border border-white/10 rounded-xl text-sm" onClick={() => {
+                    if (unlocked) setProfile((p) => ({...p, selectedTheme:theme.id}));
+                    else setPurchaseIntent({type:'THEME',id:theme.id});
+                  }}><span>{theme.name}</span><span className="text-amber-300 font-bold">{unlocked ? (profile.selectedTheme===theme.id?'Selected':'Use') : `${theme.cost} coins`}</span></button>;
+                })}
+              </div>
+            )}
+            {purchaseIntent && (
+              <div className="mt-3 border border-amber-400/40 bg-amber-500/10 rounded-xl p-3 text-sm">
+                <p className="font-bold">Confirm purchase?</p>
+                <p className="text-xs text-slate-300 mt-1">Coins will be deducted immediately. This cannot be undone.</p>
+                <div className="flex gap-2 mt-3">
+                  <button type="button" className="flex-1 p-2 bg-slate-800 rounded-lg" onClick={() => setPurchaseIntent(null)}>Cancel</button>
+                  <button type="button" className="flex-1 p-2 bg-amber-400 text-slate-950 font-bold rounded-lg" onClick={() => {
+                    const intent = purchaseIntent;
+                    const bat = BATS_CATALOG.find((b) => b.id === intent.id);
+                    const theme = STADIUM_THEMES[intent.id];
+                    if (intent.type === 'UNLOCK' && bat) setProfile((p) => purchaseBat(p, bat));
+                    if (intent.type === 'UPGRADE' && bat) setProfile((p) => upgradeBat(p, bat));
+                    if (intent.type === 'THEME' && theme) setProfile((p) => {
+                      if (p.unlockedThemes.includes(theme.id)) return {...p, selectedTheme:theme.id};
+                      if (p.coins < theme.cost) return p;
+                      return { ...p, coins:p.coins-theme.cost, selectedTheme:theme.id,
+                        unlockedThemes:[...p.unlockedThemes,theme.id],
+                        coinLedger:[{id:`theme-${theme.id}`,amount:-theme.cost,reason:`Unlock ${theme.name}`,at:Date.now()},...(p.coinLedger||[])].slice(0,60) };
+                    });
+                    setPurchaseIntent(null);
+                  }}>Confirm</button>
+                </div>
               </div>
             )}
 

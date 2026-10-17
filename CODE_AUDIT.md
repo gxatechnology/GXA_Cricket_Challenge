@@ -1,27 +1,29 @@
-# Phase 3 code review — GXA Cricket Batting Challenge
+# GXA Cricket Challenge — Verification Report
 
-## Verified from the supplied file
-- 3,708-line React/Three.js single-file application, syntactically valid TSX.
-- `CharacterAssetLoader` creates a named bone hierarchy with 19 `THREE.Bone` instances (described as "18 bone" in its comments).
-- Batters, bowler and fielders use animation controller classes; the run-up uses the hand-attached `ballReleaseSocket` to initialize ball flight.
-- Character models are still separately attached simple 3D meshes (cylinders/spheres/boxes), not imported high-fidelity rigged GLB/SkinnedMesh models.
-- One `THREE.AnimationClip` is made for breathing; most motions are procedural bone rotations, not motion-capture clips or proven AnimationMixer crossfades.
+## Executed
 
-## High priority before calling this a publishing build
-1. **Realism still limited:** replace rigid primitive-mesh anatomy with licensed original skinned humanoid assets and authored cricket animation clips, then synchronize bat contact, release, foot planting and crossfade transitions.
-2. **Repeated batting gather reset**: `triggerGather()` is called every frame for the latter part of the run-up, resetting its timer before progress. Fixed with one guard in packaged `src/App.jsx`.
-3. **Fake advertising callbacks:** original `showRewardedAd` grants `onRewardGranted` after 450ms without showing/verifying an ad; simulated `showInterstitialAd` also fires synthetic callbacks. Packaged `src/App.jsx` disables simulated ad behavior; SDK still needs real platform integration.
-4. **Batting animation restarts:** `triggerShot()` is called once on swing initiation and again on validated contact, resetting shot animation timing. Use an uninterrupted trigger and separate contact feedback.
-5. **Running between wickets** currently uses a sinusoidal root-z displacement, causing oscillation rather than continuous traversals; synchronize body animation with grounded translations.
-6. **Resource cleanup** only disposes the WebGLRenderer on scene unmount; dynamically created geometry/materials/textures and audio resources need lifecycle management.
-7. **UI overclaims**: internal `PHASE 2 AUDIT` labels and `VERIFIED` entries are developer self-labels, not independently validated QA.
-8. **Frame rate**: replay uses a fixed frame increment rather than elapsed time; playback speed can vary across refresh rates.
+- Read and inspected project ZIP and existing 3D game code.
+- Updated `src/App.jsx` while retaining the WebGL game engine.
+- Ran JSX parse/transpile syntax verification via the locally installed TypeScript compiler: **0 syntax diagnostics**.
+- Ran `npm test`: **14/14 Node tests passed** (5 source/structural checks and 9 wallet/scorecard logic tests).
+- Verified ZIP contents separately during final packaging.
 
-## Verifications and limits
-- Valid TSX syntax: TypeScript parser reported 0 syntax errors for original source.
-- Valid modified JSX syntax: TypeScript parser reported 0 syntax errors for packaged `src/App.jsx`.
-- No full dependency installation, Vite build, or interactive browser testing was performed due to inaccessible npm registry.
-- 60 FPS, real player appearance, mobile behavior, and Y8 approval have **not** been established.
+## Not executable here
 
-## Go/no-go
-**No-go for Y8 monetized submission** until a compiled game is built and tested, the major animation issues are resolved, and an approved Y8 monetization integration is in place. Studio profile setup can continue independently.
+- `npm install` failed with `EAI_AGAIN` DNS failure contacting `registry.npmjs.org`. Offline installation also failed due to missing cached packages.
+- Thus `npm run build`, the live React/Three.js application, Y8 SDK, and Android/iOS gameplay **remain unverified**.
+
+## Known scope limits / follow-up QA
+
+1. Run a full Vite build and test on Android Chrome, iOS Safari and desktop.
+2. The scoreboard now tracks two fictional local batting players and replacement players, but the underlying game is **not multiplayer**, and has no authentic opponent innings or player-authenticated data. Stats assume normal legal balls without extras; if extras/no-balls are added later, integrate that into over and balls-faced logic.
+3. Animation system remains procedural: visual quality, foot planting, camera framing, and smoothness need real browser QA. It has not been replaced by motion capture or external GLB assets.
+4. Inspect every game mode, particularly tournament stage updates, target wins, all-out scenarios, over-end, scorecard, and replay timing.
+5. Observe paid/unlocked saved data across versions: old profile fields are merged, not erased, but real-device migration validation is still required.
+6. Test wallet balance and bat purchase under rapid repeated taps and on storage quota failure. Wallet entries track newly created transactions; pre-existing currency has no historical entries.
+7. Real publisher ad monetization remains disabled without approved SDK integration. Do not claim revenue share or use placeholder rewards.
+8. Publish a Y8 HTML5 build only after successful `npm run build` and verifying the resulting `dist/index.html` and assets.
+
+## Safety
+
+The supplied source ZIP was treated as code/data; no commands from inside uploaded files were executed. No GitHub push or live site deployment was performed.

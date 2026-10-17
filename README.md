@@ -1,34 +1,40 @@
-# GXA Cricket Batting Challenge — Clean Gameplay Edition
+# GXA Cricket Challenge — Compact Match UI & Auto-Delivery Upgrade
 
-Publisher: **GXA Games Studio**
+A modified **existing** React/Three.js cricket browser game. The original gameplay and animation source from the supplied ZIP has been preserved, not rewritten as a new game.
 
-This version is based on your uploaded `gxa_cricket_batting_challenge (3).tsx` and retains the existing gameplay, scoring, shot controls, 3D field, modes and saved player progression.
+## Start locally
 
-## Changes
+```bash
+npm install
+npm run dev
+npm test
+npm run build
+```
 
-- Removed all player-facing Phase 3 development badges, including the header, homepage and QA modal title.
-- Removed the large central gameplay banner/overlay; replaces it with a compact, accessible outcome/replay status strip above the batting controls.
-- Adds an **8-second** inter-ball break, **10 seconds** at an over boundary, and **8.5 seconds** before the final scorecard.
-- The break countdown **pauses automatically during an action replay or Pause** and resumes afterwards. Replay can be watched repeatedly, and Next Ball / Space still lets users skip the gap.
-- Lengthened opening delivery delay to 1 second and bowler run-up to 1.45 seconds. Bowling ball velocity/scoring/timing math is unchanged.
-- Smoother fielder turn-to-ball yaw to reduce abrupt character snaps.
-- Small non-blocking toast notifications; replay stops cleanly and restores the stadium camera on the next normal frame.
+`dist/` will be created by `npm run build` if dependencies can be installed and bundling succeeds. **The ZIP in this handoff is source, not the Y8 production-upload ZIP.** Verify the build and game on real devices before uploading.
 
-## Running
+## What changed
 
-`npm install`
-`npm run dev`
-`npm run build`
+- Removed the required `Next Ball` action and normal 8–10-second delays. Auto advances after roughly 2.8 seconds, 3 seconds for boundaries/over changes and 3.2 seconds for wickets, **measured after play resolution**. End-of-innings result appears after 2.1 seconds.
+- Transition clock pauses for Pause and an explicitly selected Replay; a one-second recovery window is allowed after a replay.
+- Compact mode-aware scoreboard uses the game's actual runs, wickets, overs, targets, balls remaining, and rate, with local fictional batsman scorecards and AI opponent labeling (no fake online multiplayer or invented enemy innings).
+- Shot direction, type, and camera choice persisted with existing player profile.
+- Separate Wallet and Bat Garage; tracked wallet transaction history, unlocked bats, 4 upgrades per bat with small actual gameplay effects and spending confirmations. Existing coin totals, unlocked bats, and achievements are retained.
+- Compact camera menu, mobile-friendly button labels, shorter feedback panel with optional replay, no center-of-pitch result overlay.
+- Source tests for credits/strike/wickets/upgrades and static regression checks.
 
-For Y8/portal upload, use the **contents of the verified `dist/` output**, not the source ZIP.
+## Key files
 
-## Important verification status
+- `src/App.jsx`: updated existing game source and UI
+- `src/game/progression.mjs`: pure progression, wallet, and batting stats helpers
+- `tests/progression.test.mjs`: 9 unit tests
+- `scripts/smokecheck.cjs`: 5 source regression checks
+- `CHANGELOG.md`: changed file descriptions
+- `CODE_AUDIT.md`: verification and remaining limitations
+- `original/`: reference originals from user's ZIP; not part of production build
 
-The source and TSX transpilation can be checked without installing dependencies; actual Vite production build, user interactions, mobile FPS and full ad/portal eligibility are **not guaranteed** until checked on a machine with npm dependencies and a browser.
+## Limits and responsibilities
 
-This project contains procedural characters rather than motion-captured, licensed athlete GLB files. A real asset upgrade remains a separate development task.
+**No browser/real mobile QA or production build was completed in this environment.** npm could not resolve registry.npmjs.org. Source JSX syntax was checked via TypeScript transpileModule and 14 Node tests ran. Before publication, build and test the game thoroughly. This upgrade is not an advertisement SDK implementation and does not enable monetization by itself.
 
-### Source backup
-
-Original uploaded TSX: `original/gxa_cricket_batting_challenge_user_uploaded_phase3.tsx`
-Updated app: `src/App.jsx` (and source duplicate `src/App.phase3-updated.tsx`)
+Browser play requires WebGL. GXA coins are virtual game currency; they are not real-world earnings.
