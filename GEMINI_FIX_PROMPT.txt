@@ -1,0 +1,17 @@
+You are working on my EXISTING GXA Cricket Batting Challenge React/Three.js game. Use the supplied Phase 3 source, the audit, and the screenshot showing blocky gameplay. Do NOT rebuild or delete any existing modes/UI.
+
+TARGET: Make actual gameplay resemble polished cricket sports graphics and natural human motion, not just a promotional poster. A code-only bone hierarchy built from cylinders/spheres is not enough. Integrate genuinely rigged, original or properly licensed GLB/GLTF skinned cricket athlete assets, with properly authored batting/bowling/fielding animation clips. Include the model and animation files locally in project output; verify rights. Use appropriate SkinnedMesh/skeleton bindings and AnimationMixer crossfade blending. Avoid falsely describing simple bone-parented primitive meshes as motion capture.
+
+Fix these concrete bugs from the current uploaded source:
+(1) `triggerGather()` is invoked on every RUNUP frame, resetting `stateTime`. Trigger once per delivery and blend from idle to gather.
+(2) Bat swing starts on input and is restarted again on successful ball contact; preserve continuity from backswing through contact and follow-through.
+(3) Replace sinusoidal striker/non-striker Z teleportation with controlled travel between creases and grounded foot contacts.
+(4) Fix frame-rate-dependent replay playback (increment with dt).
+(5) Clean up geometry, textures, materials, animation mixers, audio and event listeners appropriately on teardown/theme changes.
+(6) The code has 19 named THREE.Bone joints, despite comments saying 18. Correct any inaccurate claims.
+(7) Do not generate fake `onRewardGranted` or `onAfterAd` events with timeout. Use real supported Y8 SDK callbacks if permitted; otherwise keep monetization disabled and hidden. Do not simulate impressions.
+(8) Replace false 'VERIFIED' labels and 'PHASE 2' text with truthful Phase 3 status after test verification.
+
+Preserve: all existing game modes, match scoring, batting timing, current controls, stadium themes, armory, achievements, score persistence and camera settings. Keep responsive mobile/desktop play. Avoid copyright-infringing player likenesses or team logos. Optimize model LOD, draw calls, textures and animation updates for web browsers.
+
+Deliver a complete runnable project and locally bundled models/animations, real before/after gameplay captures, changed-files list, `npm install`, `npm run build`, and browser/mobile test results. Never claim running a test you did not execute. Provide an upload-ready `dist/` ZIP for Y8 only after verifying the production build and all real gameplay.
